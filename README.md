@@ -8,7 +8,7 @@ Benefits:
 3. Multi-accounts
 
 ---
-# Getting an API Token in Telegram via @BotFather
+## Getting an API Token in Telegram via @BotFather
 
 To create a new bot and obtain an API token, follow these steps:
 
