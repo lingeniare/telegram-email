@@ -5,7 +5,8 @@ Forwards the email to your chat or telegram group.
 Benefits:
 1. Autorun
 2. Blacklist
-3. Multi-accounts
+3. Clean-text
+4. Multi-accounts
 
 ---
 ## Getting an API Token in Telegram via @BotFather
