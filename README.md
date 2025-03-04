@@ -29,9 +29,6 @@ The bot can send messages to you in private chats. However, to send messages in 
 
 To retrieve your personal ID or a group's ID, use [@getmyid_bot](https://t.me/getmyid_bot).  
 ```  
-
-Если тебе нужно добавить что-то еще, говори! 🚀
-
 ## Installation on Windows
 
 ### Install Python:
