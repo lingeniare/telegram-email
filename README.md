@@ -1,7 +1,11 @@
 # Email to Telegram Bot
 
 ## Summary
-Installation is very simple. Below is the instruction for setting up the script and automating the service to ensure it runs on system startup.
+Forwards the email to your chat or telegram group.
+Benefits:
+1. Autorun
+2. Blacklist
+3. Multi-accounts
 
 ---
 
