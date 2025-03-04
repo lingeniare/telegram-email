@@ -8,6 +8,29 @@ Benefits:
 3. Multi-accounts
 
 ---
+# Getting an API Token in Telegram via @BotFather
+
+To create a new bot and obtain an API token, follow these steps:
+
+1. Open Telegram and start a chat with [@BotFather](https://t.me/BotFather).  
+2. Send the command:  
+   ```
+   /newbot
+   ```
+3. Enter a name for your bot.  
+4. Choose a unique username ending with `_bot` (e.g., `myawesomebot_bot`).  
+5. Copy the provided API token.  
+
+## Bot Permissions  
+
+The bot can send messages to you in private chats. However, to send messages in a group or chat, you must add it as an admin.  
+
+## Getting a User or Group ID  
+
+To retrieve your personal ID or a group's ID, use [@getmyid_bot](https://t.me/getmyid_bot).  
+```  
+
+Если тебе нужно добавить что-то еще, говори! 🚀
 
 ## Installation on Windows
 
