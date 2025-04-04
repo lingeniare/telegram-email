@@ -7,70 +7,110 @@ import telebot
 import logging
 import signal
 import sys
-import re
+import socket
 from email.header import decode_header
 from datetime import datetime
+import functools
+import argparse
 
 # Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    filename='email_bot.log'
+    handlers=[
+        logging.FileHandler('email_bot.log'),
+        logging.StreamHandler()  # Добавляем вывод в консоль
+    ]
 )
 logger = logging.getLogger(__name__)
 
 # Конфигурация
 CONFIG_FILE = 'config.json'
+DEFAULT_CONFIG = {
+    "email_accounts": [
+        {
+            "name": "Account 1",
+            "server": "imap.example.com",
+            "port": 993,
+            "username": "your_email1@example.com",
+            "password": "your_password1",
+            "folder": "INBOX",
+            "last_checked_uid": 0
+        },
+    ],
+    "telegram": {
+        "bot_token": "your_telegram_bot_token",
+        "chat_id": "your_chat_id"
+    },
+    "settings": {
+        "check_interval": 60,  # в секундах
+    },
+    "blacklist": {
+        "senders": ["spam@example.com", "newsletter@example.com"],
+        "subjects": ["Специальное предложение", "Скидки"],
+        "contains": ["Unsubscribe", "отписаться"],
+        "domains": ["spam-domain.com"]
+    }
+}
+
 
 # Загрузка конфигурации
-def load_config():
-    if not os.path.exists(CONFIG_FILE):
-        default_config = {
-            "email_accounts": [
-                {
-                    "name": "Account 1",
-                    "server": "imap.example.com",
-                    "port": 993,
-                    "username": "your_email1@example.com",
-                    "password": "your_password1",
-                    "folder": "INBOX",
-                    "last_checked_uid": 0
-                },
-                # Добавьте здесь другие аккаунты аналогично
-            ],
-            "telegram": {
-                "bot_token": "your_telegram_bot_token",
-                "chat_id": "your_chat_id"
-            },
-            "settings": {
-                "check_interval": 60,  # в секундах
-            },
-            "blacklist": {
-                "senders": ["spam@example.com", "newsletter@example.com"],
-                "subjects": ["Специальное предложение", "Скидки"],
-                "contains": ["Unsubscribe", "отписаться"],
-                "domains": ["spam-domain.com"]
-            }
-        }
-        with open(CONFIG_FILE, 'w') as f:
-            json.dump(default_config, f, indent=4)
-        logger.info(f"Создан новый файл конфигурации {CONFIG_FILE}")
-        return default_config
+def load_config(config_file: str) -> dict:
+    """Loads the configuration from the given JSON file.
 
-    with open(CONFIG_FILE, 'r') as f:
-        logger.info(f"Загружена конфигурация из {CONFIG_FILE}")
-        return json.load(f)
+    Args:
+        config_file: The path to the configuration file.
+
+    Returns:
+        A dictionary containing the configuration.
+    """
+    try:
+        with open(config_file, 'r') as f:
+            logger.info(f"Загружена конфигурация из {config_file}")
+            return json.load(f)
+    except FileNotFoundError:
+        logger.warning(f"Файл конфигурации {config_file} не найден. Создаем файл с конфигурацией по умолчанию.")
+        save_config(DEFAULT_CONFIG, config_file)
+        return DEFAULT_CONFIG
+    except json.JSONDecodeError as e:
+        logger.error(f"Ошибка при чтении файла конфигурации {config_file}: {e}. Используется конфигурация по умолчанию.")
+        return DEFAULT_CONFIG
+
+
+def save_config(config: dict, config_file: str) -> None:
+    """Saves the configuration to the given JSON file."""
+    try:
+        with open(config_file, 'w') as f:
+            json.dump(config, f, indent=4)
+        logger.info(f"Конфигурация сохранена в {config_file}")
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении конфигурации в {config_file}: {e}")
+
 
 # Сохранение последнего проверенного UID для конкретного аккаунта
-def save_last_uid(account_index, uid):
-    config = load_config()
+def save_last_uid(config: dict, account_index: int, uid: int, config_file: str) -> None:
+    """Saves the last checked UID for a specific account.
+
+    Args:
+        config: The configuration dictionary.
+        account_index: The index of the account.
+        uid: The last checked UID.
+    """
     config['email_accounts'][account_index]['last_checked_uid'] = uid
-    with open(CONFIG_FILE, 'w') as f:
-        json.dump(config, f, indent=4)
+    save_config(config, config_file)
     logger.info(f"Сохранен последний проверенный UID: {uid} для аккаунта {config['email_accounts'][account_index]['name']}")
 
+
 # Декодирование заголовков письма
-def decode_email_header(header):
+def decode_email_header(header: str) -> str:
+    """Decodes an email header.
+
+    Args:
+        header: The email header to decode.
+
+    Returns:
+        The decoded header as a string.
+    """
     if not header:
         return ""
 
@@ -82,118 +122,68 @@ def decode_email_header(header):
                 try:
                     header_str += value.decode(encoding)
                 except UnicodeDecodeError:
-                    header_str += value.decode('latin-1')
+                    logger.warning(f"UnicodeDecodeError при декодировании заголовка с кодировкой {encoding}.  Используется 'latin-1'")
+                    header_str += value.decode('latin-1', errors='ignore')  # 'ignore' skips problematic characters
             else:
                 try:
                     header_str += value.decode('utf-8')
                 except UnicodeDecodeError:
-                    header_str += value.decode('latin-1')
+                    logger.warning("UnicodeDecodeError при декодировании заголовка без указанной кодировки. Используется 'latin-1'")
+                    header_str += value.decode('latin-1', errors='ignore')
         else:
             header_str += str(value)
     return header_str
 
-# Получение текста письма (Обновленная функция)
-def get_email_body(msg):
-    text_content = ""
-    html_content = ""
-
-    # Проверяем multipart сообщения
-    if msg.is_multipart():
-        for part in msg.walk():
-            content_type = part.get_content_type()
-            content_disposition = str(part.get("Content-Disposition"))
-
-            # Пропускаем вложения
-            if "attachment" in content_disposition:
-                continue
-
-            # Получаем текстовую часть
-            if content_type == "text/plain":
-                try:
-                    text_content = part.get_payload(decode=True).decode('utf-8', errors='ignore') # Try UTF-8 first, ignore errors
-                except:
-                    try:
-                        text_content = part.get_payload(decode=True).decode('latin-1', errors='ignore') # Fallback to latin-1, ignore errors
-                    except:
-                        text_content = "Ошибка декодирования текста"
-
-            # Или HTML если текстовой нет
-            elif content_type == "text/html" and not text_content:
-                try:
-                    html_content = part.get_payload(decode=True).decode('utf-8', errors='ignore') # Try UTF-8 first, ignore errors
-                except:
-                    try:
-                        html_content = part.get_payload(decode=True).decode('latin-1', errors='ignore') # Fallback to latin-1, ignore errors
-                    except:
-                        html_content = "Ошибка декодирования HTML"
-    else:
-        # Если сообщение не мультичастное
-        content_type = msg.get_content_type()
-        try:
-            payload = msg.get_payload(decode=True)
-            if not payload:
-                return "Пустое сообщение"
-
-            if content_type == "text/plain":
-                text_content = payload.decode('utf-8', errors='ignore')
-            elif content_type == "text/html":
-                html_content = payload.decode('utf-8', errors='ignore')
-        except:
-            try:
-                payload = msg.get_payload(decode=True)
-                decoded = payload.decode('latin-1', errors='ignore')
-                if content_type == "text/plain":
-                    text_content = decoded
-                else:
-                    html_content = decoded
-            except:
-                return "Не удалось декодировать сообщение"
-
-    # Приоритет для текстового содержимого
-    if text_content:
-        return text_content
-
-    # Если есть только HTML, очищаем HTML-теги и entities более тщательно
-    if html_content:
-        # Remove HTML tags
-        body_text = re.sub(r'<[^>]+>', ' ', html_content)
-        # Replace HTML entities (like &nbsp;) with spaces and remove extra spaces
-        body_text = re.sub(r'&[^;]+;', ' ', body_text)
-        body_text = re.sub(r'\s+', ' ', body_text).strip()
-        return body_text
-
-    return "Не удалось получить текст письма"
 
 # Проверка письма на наличие в черном списке
-def is_blacklisted(from_addr, subject, body, blacklist):
-    # Проверка отправителя
-    for sender in blacklist.get('senders', []):
-        if sender.lower() in from_addr.lower():
-            logger.info(f"Письмо от {from_addr} в черном списке отправителей")
-            return True
+def is_blacklisted(from_addr: str, subject: str, blacklist: dict) -> bool:
+    """Checks if an email is blacklisted.
 
-    # Проверка домена отправителя
-    for domain in blacklist.get('domains', []):
-        if '@' in from_addr and domain.lower() in from_addr.lower().split('@')[1]:
-            logger.info(f"Домен {domain} в черном списке доменов")
-            return True
+    Args:
+        from_addr: The sender's email address.
+        subject: The email subject.
+        blacklist: The blacklist configuration.
 
-    # Проверка темы
-    for subj_pattern in blacklist.get('subjects', []):
-        if subj_pattern.lower() in subject.lower():
-            logger.info(f"Тема '{subject}' содержит паттерн из черного списка: {subj_pattern}")
-            return True
+    Returns:
+        True if the email is blacklisted, False otherwise.
+    """
+    from_addr_lower = from_addr.lower()
+    subject_lower = subject.lower()
 
-    # Проверка содержимого
-    for content_pattern in blacklist.get('contains', []):
-        if content_pattern.lower() in body.lower():
-            logger.info(f"Текст письма содержит паттерн из черного списка: {content_pattern}")
-            return True
+    if any(sender.lower() in from_addr_lower for sender in blacklist.get('senders', [])):
+        logger.info(f"Письмо от {from_addr} в черном списке отправителей")
+        return True
+
+    if any(domain.lower() in from_addr_lower.split('@')[1] for domain in blacklist.get('domains', []) if '@' in from_addr):
+        logger.info(f"Домен {domain} в черном списке доменов")
+        return True
+
+    if any(subj_pattern.lower() in subject_lower for subj_pattern in blacklist.get('subjects', [])):
+        logger.info(f"Тема '{subject}' содержит паттерн из черного списка: {subj_pattern}")
+        return True
 
     return False
 
+
+def send_telegram_notification(bot: telebot.TeleBot, chat_id: str, message: str, is_error: bool = False) -> None:
+    """Sends a notification to Telegram.
+    
+    Args:
+        bot: The Telegram bot instance
+        chat_id: The chat ID to send the message to
+        message: The message to send
+        is_error: Whether this is an error message
+    """
+    try:
+        prefix = "⚠️ ОШИБКА: " if is_error else "ℹ️ "
+        bot.send_message(chat_id, f"{prefix}{message}", parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"Failed to send Telegram notification: {e}")
+
+
 # Проверка наличия новых писем для конкретного аккаунта
-def check_account_emails(account, account_index, bot, chat_id, blacklist):
+def check_account_emails(config: dict, account: dict, account_index: int, bot: telebot.TeleBot, chat_id: str, blacklist: dict, config_file: str) -> None:
+    """Checks for new emails in a specific account."""
     mail_server = account['server']
     mail_port = account['port']
     username = account['username']
@@ -203,116 +193,139 @@ def check_account_emails(account, account_index, bot, chat_id, blacklist):
     account_name = account['name']
 
     try:
-        # Подключаемся к серверу
-        mail = imaplib.IMAP4_SSL(mail_server, mail_port)
-        mail.login(username, password)
-        mail.select(mail_folder)
-
-        # Получаем все UID писем
-        result, data = mail.uid('search', None, "ALL")
-        if not data or not data[0]:
-            logger.info(f"Нет писем в почтовом ящике {account_name}")
-            mail.logout()
-            return
-
-        email_uids = data[0].split()
-
-        if not email_uids:
-            logger.info(f"Нет писем в почтовом ящике {account_name}")
-            mail.logout()
-            return
-
-        # Находим новые письма (UID больше последнего сохраненного)
-        new_emails = [uid for uid in email_uids if int(uid) > last_uid]
-
-        if not new_emails:
-            logger.info(f"Нет новых писем в {account_name}")
-            mail.logout()
-            return
-
-        logger.info(f"Найдено {len(new_emails)} новых писем в {account_name}")
-
-        # Обрабатываем новые письма в обратном порядке (от старых к новым)
-        for uid in sorted(new_emails):
+        with imaplib.IMAP4_SSL(mail_server, mail_port) as mail:
             try:
-                result, data = mail.uid('fetch', uid, '(RFC822)')
+                mail.login(username, password)
+                mail.select(mail_folder)
+
+                result, data = mail.uid('search', None, "ALL")
                 if not data or not data[0]:
-                    continue
+                    logger.info(f"Нет писем в почтовом ящике {account_name}")
+                    return
 
-                raw_email = data[0][1]
-                msg = email.message_from_bytes(raw_email)
+                email_uids = data[0].split()
 
-                # Получаем данные письма
-                from_addr = decode_email_header(msg.get('From', 'Unknown'))
-                subject = decode_email_header(msg.get('Subject', 'No Subject'))
-                date_str = msg.get('Date', datetime.now().strftime("%a, %d %b %Y %H:%M:%S %z"))
+                if not email_uids:
+                    logger.info(f"Нет писем в почтовом ящике {account_name}")
+                    return
 
-                # Получаем текст письма
-                body = get_email_body(msg)
+                new_emails = [uid for uid in email_uids if int(uid) > last_uid]
 
-                # Проверяем черный список
-                if is_blacklisted(from_addr, subject, body, blacklist):
-                    logger.info(f"Письмо от {from_addr} с темой '{subject}' пропущено (в черном списке)")
-                    save_last_uid(account_index, int(uid))
-                    continue
+                if not new_emails:
+                    logger.info(f"Нет новых писем в {account_name}")
+                    return
 
-                # Формируем сообщение для отправки
-                message = f"📧 *Новое письмо* ({account_name})\n\n" \
-                          f"*От:* {from_addr}\n" \
-                          f"*Тема:* {subject}\n" \
-                          f"*Дата:* {date_str}\n\n"
+                logger.info(f"Найдено {len(new_emails)} новых писем в {account_name}")
+                send_telegram_notification(bot, chat_id, f"Найдено {len(new_emails)} новых писем в {account_name}")
 
-                # Отправляем заголовок в Telegram
-                bot.send_message(chat_id, message, parse_mode='Markdown')
+                # Собираем все новые письма с их датами
+                emails_to_process = []
+                for uid in new_emails:
+                    try:
+                        result, data = mail.uid('fetch', uid, '(RFC822)')
+                        if not data or not data[0]:
+                            continue
 
-                # Отправляем текст письма отдельным сообщением с форматированием кода
-                if body:
-                    # Ограничиваем длину текста
-                    body_text = body[:4000] + ('...' if len(body) > 4000 else '')
-                    # Отправляем как блок кода для сохранения форматирования
-                    bot.send_message(chat_id, f"```\n{body_text}\n```", parse_mode='Markdown')
+                        raw_email = data[0][1]
+                        msg = email.message_from_bytes(raw_email)
+                        date_str = msg.get('Date', '')
+                        try:
+                            date = email.utils.parsedate_to_datetime(date_str)
+                        except:
+                            date = datetime.now()
+                        
+                        emails_to_process.append((uid, msg, date))
+                    except Exception as e:
+                        error_msg = f"Ошибка при получении письма с UID {uid} из {account_name}: {e}"
+                        logger.error(error_msg)
+                        send_telegram_notification(bot, chat_id, error_msg, is_error=True)
 
-                logger.info(f"Письмо с UID {uid} от {account_name} отправлено в Telegram")
+                # Сортируем письма по дате (от старых к новым)
+                emails_to_process.sort(key=lambda x: x[2])
 
-                # Обновляем последний проверенный UID
-                save_last_uid(account_index, int(uid))
+                # Обрабатываем отсортированные письма
+                for uid, msg, date in emails_to_process:
+                    try:
+                        from_addr = decode_email_header(msg.get('From', 'Unknown'))
+                        subject = decode_email_header(msg.get('Subject', 'No Subject'))
+                        date_str = msg.get('Date', date.strftime("%a, %d %b %Y %H:%M:%S %z"))
 
+                        if is_blacklisted(from_addr, subject, blacklist):
+                            logger.info(f"Письмо от {from_addr} с темой '{subject}' пропущено (в черном списке)")
+                            save_last_uid(config, account_index, int(uid), config_file)
+                            continue
+
+                        message = f"📧 *Новое письмо* ({account_name})\n\n" \
+                                f"*От:* {from_addr}\n" \
+                                f"*Тема:* {subject}\n" \
+                                f"*Дата:* {date_str}\n"
+
+                        bot.send_message(chat_id, message, parse_mode='Markdown')
+                        logger.info(f"Письмо с UID {uid} от {account_name} отправлено в Telegram")
+                        save_last_uid(config, account_index, int(uid), config_file)
+
+                    except Exception as e:
+                        error_msg = f"Ошибка при обработке письма с UID {uid} из {account_name}: {e}"
+                        logger.error(error_msg)
+                        send_telegram_notification(bot, chat_id, error_msg, is_error=True)
+
+            except imaplib.IMAP4.error as e:
+                error_msg = f"Ошибка при логине или выборе папки для {account_name}: {e}"
+                logger.error(error_msg)
+                send_telegram_notification(bot, chat_id, error_msg, is_error=True)
             except Exception as e:
-                logger.error(f"Ошибка при обработке письма с UID {uid} из {account_name}: {str(e)}")
+                error_msg = f"Произошла ошибка в процессе работы с почтой {account_name}: {e}"
+                logger.error(error_msg)
+                send_telegram_notification(bot, chat_id, error_msg, is_error=True)
 
-        mail.logout()
-
+    except socket.gaierror as e:
+        error_msg = f"Ошибка при подключении к серверу {mail_server} для {account_name}: {e}"
+        logger.error(error_msg)
+        send_telegram_notification(bot, chat_id, error_msg, is_error=True)
     except Exception as e:
-        logger.error(f"Ошибка при проверке почты {account_name}: {str(e)}")
+        error_msg = f"Не удалось установить соединение с сервером {mail_server} для {account_name}: {e}"
+        logger.error(error_msg)
+        send_telegram_notification(bot, chat_id, error_msg, is_error=True)
+
 
 # Проверка наличия новых писем для всех аккаунтов
-def check_emails():
-    config = load_config()
+def check_emails(config: dict, bot: telebot.TeleBot, chat_id: str, config_file: str) -> None:
+    """Checks for new emails in all configured accounts."""
     accounts = config['email_accounts']
+
+    # Получаем черный список
+    blacklist = config.get('blacklist', {})
+
+    # Проверяем каждый аккаунт
+    for i, account in enumerate(accounts):
+        check_account_emails(config, account, i, bot, chat_id, blacklist, config_file)
+
+
+# Обработка сигналов для корректного завершения
+def signal_handler(sig: int, frame: object) -> None:
+    """Handles signals for graceful shutdown."""
+    logger.info("Получен сигнал завершения. Закрываем бота...")
+    sys.exit(0)
+
+
+# Основной цикл
+def main() -> None:
+    """Main function of the email bot."""
+    parser = argparse.ArgumentParser(description="Telegram bot for forwarding emails.")
+    parser.add_argument('--config', type=str, default=CONFIG_FILE, help='Path to the configuration file.')
+    args = parser.parse_args()
+
+    config_file = args.config
+    config = load_config(config_file)
 
     # Настройки Telegram
     bot_token = config['telegram']['bot_token']
     chat_id = config['telegram']['chat_id']
 
-    # Получаем черный список
-    blacklist = config.get('blacklist', {})
+    check_interval = config['settings']['check_interval']
 
     # Создаем бота
     bot = telebot.TeleBot(bot_token)
-
-    # Проверяем каждый аккаунт
-    for i, account in enumerate(accounts):
-        check_account_emails(account, i, bot, chat_id, blacklist)
-
-# Обработка сигналов для корректного завершения
-def signal_handler(sig, frame):
-    logger.info("Получен сигнал завершения. Закрываем бота...")
-    sys.exit(0)
-
-# Основной цикл
-def main():
-    config = load_config()
-    check_interval = config['settings']['check_interval']
 
     # Регистрируем обработчики сигналов
     signal.signal(signal.SIGINT, signal_handler)
@@ -322,11 +335,12 @@ def main():
 
     while True:
         try:
-            check_emails()
+            check_emails(config, bot, chat_id, config_file)
             time.sleep(check_interval)
         except Exception as e:
-            logger.error(f"Ошибка в основном цикле: {str(e)}")
+            logger.error(f"Ошибка в основном цикле: {e}")
             time.sleep(check_interval)
+
 
 if __name__ == "__main__":
     main()
